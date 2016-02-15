@@ -1,0 +1,12 @@
+#!/bin/bash
+input_file="$1"
+
+(
+	echo '--------------------'
+	date --iso=minutes
+
+	report="$(IMC-DNS-mon-comparison --input-file "$input_file")"
+	echo "$report"
+	mail_to_mailserver --to-addr 'robin.schneider@hamcos.de' --subject 'IMC-DNS-mon-comparison (there are mismatches)' --body "$report"
+
+) >> /var/log/IMC-DNS-mon-comparison/log

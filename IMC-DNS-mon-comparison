@@ -1,0 +1,566 @@
+#!/usr/bin/env perl
+#
+## @author Robin Schneider <ypid@riseup.net>
+## @company hamcos IT Service GmbH http://www.hamcos.de
+## @license AGPLv3 <https://www.gnu.org/licenses/agpl-3.0.html>
+
+# Documentation {{{
+
+=encoding UTF-8
+=head1 NAME
+
+IMC-DNS-mon-comparison - Compare a CSV report from IMC against Monitoring and DNS.
+
+=head1 DESCRIPTION
+
+The script reads a CSV list exported by IMC and checks if the hosts do exist in the Monitoring system (on which this script is intended to run) and if the hostname resolves to the IPv4 address contained in the IMC CSV. It also checks if the IPv4 address has a reverse record pointing to its FQDN.
+
+The check if a host is monitored is currently implemented by checking against an LConf configuration export on the master.
+Adding a second check using MK Livestatus can be implemented but the check against LConf export was preferred to allow to test this script using Bats.
+
+Any deviations will be reported by the script in CSV format.
+
+=head1 SYNOPSIS
+
+IMC-DNS-mon-comparison [arguments]
+
+=head1 USAGE
+
+./IMC-DNS-mon-comparison --input-file test/input/imc_export.csv
+
+=head1 OPTIONS
+
+=over
+
+=item -v|--verbose
+
+Verbose mode. This may be supplied multiple times to get more and more information.
+
+=item -d|--debug
+
+Debug mode. This may be supplied multiple times to get more and more information.
+
+=item -i|--input-file
+
+Required. Specifies the IMC report CSV file.
+
+=item -I|--input-file-encoding
+
+The scripts try to guess the encoding. If that fails, you will have to provide the encoding.
+
+=item -o|--output-file
+
+If given, write the report to this file. If not given, write it to STDOUT.
+
+=item -J|--input-json-file
+
+Reads the data structure of the given JSON file into the %hosts and skip the population of the %hosts hash in this script.
+Useful for testing.
+
+=item -j|--output-json-file
+
+Writes the internal data structure of %hosts into the given file path using JSON.
+Useful for testing.
+
+=item -D|--lconf-export-dir
+
+Directory path of LConf to use for checking if the entry is referenced.
+
+Defaults to F</var/LConf/lconf.export>.
+
+=item -c|--compare-with
+
+Against which dataset should the input data be compared with. Options are:
+
+    DNS
+    Mon
+
+Datasets which are not considered will be reported as OK in the CSV --output-file. In the --output-json-file, they will be not contained as the check has not been executed.
+
+Defaults to: DNS,Mon
+
+=item -h|--help
+
+Print help page.
+
+=item -V|--version
+
+Print IMC-DNS-mon-comparison version.
+
+=back
+
+=head1 REQUIRED ARGUMENTS
+
+Which arguments are required depends on in which output mode the script is running.
+
+By default only the --output-ldif-file argument is required.
+
+=head1 DEPENDENCIES
+
+Required modules:
+
+    File::Find
+    List::MoreUtils
+
+    File::Slurp
+    Encode
+    Encode::Guess
+
+    Text::CSV
+    JSON
+
+    Net::DNS
+    Net::IP
+
+On Debian those dependencies are packaged. Just install them:
+
+B<libnet-dns-perl libnet-ip-perl libtext-csv-perl libtext-csv-xs-perl>
+
+CPAN:
+
+    cpan File::Find List::MoreUtils File::Slurp Encode Encode::Guess Text::CSV JSON Net::DNS Net::IP
+
+=head1 CONFIGURATION
+
+None.
+
+=head1 DIAGNOSTICS
+
+Useful options for diagnostics:
+
+    --debug
+    --input-json-file
+    --output-json-file
+
+Also, spin up the test framework which uses Bats.
+
+=head1 EXIT STATUS
+
+0   No errors occurred and no deviations could be found.
+
+1   No errors occurred but there where deviations.
+
+2   Any other error which which caused the script to die.
+
+=head1 BUGS AND LIMITATIONS
+
+None that I know of. Submit patches if you find bugs :)
+
+=head1 INCOMPATIBILITIES
+
+None that I am aware of.
+
+=head1 AUTHOR
+
+Robin Schneider <robin.schneider@hamcos.de>
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2015 Robin Schneider <robin.schneider@hamcos.de>
+
+hamcos IT Service GmbH http://www.hamcos.de
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, version 3 of the
+License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+=cut
+
+# }}}
+
+# Preamble {{{
+use strict;
+use warnings;
+use autodie;
+use utf8;
+binmode STDOUT, ':encoding(UTF-8)';
+use feature qw(say);
+
+use Getopt::Long qw(:config no_ignore_case bundling);
+use Pod::Usage;
+
+use File::Find;
+use List::MoreUtils qw(first_index);
+
+use File::Slurp qw(read_file write_file);
+use Encode;
+use Encode::Guess;
+
+use Text::CSV;
+use JSON;
+
+use Net::DNS;
+use Net::IP;
+
+use Data::Dump qw(dump);
+
+# }}}
+
+use version; our $VERSION = qv('0.9.0');
+
+=head1 SUBROUTINES
+
+=over
+=cut
+
+sub read_input_csv_file { ## {{{
+
+=item read_input_csv_file()
+
+Read CSV file exported by IMC and return the information contained as hash reference.
+=cut
+
+    my $opt = shift;
+
+    my $csv_file_path     = $opt->{input_file};
+    my $csv_file_encoding = $opt->{input_file_encoding};
+    my %hosts;
+    my $encoding;
+
+    my $csv = Text::CSV->new(
+        {
+            binary    => 1,    ## Setting this "is still a wise option" according to the manual.
+            auto_diag => 1,    ## Will cause error_diag () to be automatically be called in void context upon errors.
+            sep_char  => "\t", ## Seems to be the default of IMCs "CSV" format …
+        }
+    );
+
+    open( my $file_fh, '<', $csv_file_path );
+    if ($csv_file_encoding) {
+        $encoding = $csv_file_encoding;
+    }
+    else {
+        $encoding = Encode::Guess->guess(<$file_fh>);
+        ref($encoding) or die "Error for file '$csv_file_path': $encoding";
+        seek $file_fh, 0, 0;
+    }
+    binmode $file_fh, ":encoding($encoding->{Name})";
+
+    ## Reads input of the format (tab seperated):
+    ##                                                                                                        Typo V
+    ##   "Device Asset Report"	"This report shows device asset information include  stack information and slot infomation."
+    ##   "Device Label"	"IP"	"Model"	"Unit Model"	"Serial Number"	"Hardware Version"	"Software Version"	"Firmware Version"
+    ##   "swt01.example.com"	"192.0.2.42"	"HP 2520G-8-PoE Switch"	"Device"	"23"	"5"	"J.5.23"	"J.fnord"
+    ##   "swt02.example.com"	"192.0.2.43"	"HP 2520G-8-PoE Switch"	"Device"	"23"	"5"	"J.5.23"	"J.fnord"
+
+    my $mode = "header";
+    while ( my $row = $csv->getline($file_fh) ) {
+        if (    $mode eq "header"
+            and $row->[0] eq "Device Label"
+            and $row->[1] eq "IP" )
+        {
+            $mode = "body";
+        }
+        elsif ( $mode eq "body" ) {
+            my $hostname = $row->[0];
+
+            if ( $hostname ne q{} ) {
+                my $count = 1;
+                $hosts{$hostname} = {
+                    'info' => {
+                        'ipv4'             => $row->[ $count++ ],
+                        'model'            => $row->[ $count++ ],
+                        'unit_model'       => $row->[ $count++ ],
+                        'sn'               => $row->[ $count++ ],
+                        'hardware_version' => $row->[ $count++ ],
+                        'software_version' => $row->[ $count++ ],
+                        'firmware_version' => $row->[ $count++ ],
+                    },
+                    'check' => {},
+                };
+            }
+        }
+    } ## end while ( my $row = $csv->getline...)
+    close($file_fh);
+    if ( $mode eq "header" ) {
+        die "Unknown input file format!";
+    }
+
+    return \%hosts;
+
+} ## }}}
+
+sub check_against_dns { ## {{{
+
+=item check_against_dns()
+
+Check the hosts given as $hosts_ref against the systems DNS server and store the result in the given %{$hosts_ref}.
+=cut
+
+    my $hosts_ref = shift;
+    my $opt       = shift;
+
+    my $resolver = Net::DNS::Resolver->new();
+
+    foreach my $hostname ( keys %{$hosts_ref} ) {
+        my $ipv4 = $hosts_ref->{$hostname}->{info}->{ipv4};
+        next if ( not defined $ipv4 or $ipv4 eq q{} );
+
+        check_dns_a_record( $resolver, $opt, $hosts_ref, $hostname, $ipv4 );
+        check_dns_ptr_record( $resolver, $opt, $hosts_ref, $hostname, $ipv4 );
+
+    }
+} ## }}}
+
+sub check_dns_a_record { ## {{{
+
+=item check_dns_a_record()
+
+Check the DNS mapping from $hostname to $ipv4 address and store the result in the given %{$hosts_ref}.
+=cut
+
+    my $resolver  = shift;
+    my $opt       = shift;
+    my $hosts_ref = shift;
+    my $hostname  = shift;
+    my $ipv4      = shift;
+
+    my $reply = $resolver->search( $hostname, 'A' );
+    if ( defined $reply and $resolver->errorstring eq 'NOERROR' ) {
+        my $problem_count = 0;
+        my @ipv4s_dns =
+            map { $_->address } grep { $_->type eq "A" } $reply->answer;
+        foreach my $ipv4_dns (@ipv4s_dns) {
+            if ( $ipv4_dns ne $ipv4 ) {
+                $problem_count++;
+            }
+        }
+        if ( scalar @ipv4s_dns > 1 or $problem_count ) {
+            $hosts_ref->{$hostname}->{check}->{'DNS A'} =
+                "wrong (IMC: $ipv4; DNS: " . join( q{, }, sort @ipv4s_dns ) . ")";
+        }
+        else {
+            $hosts_ref->{$hostname}->{check}->{'DNS A'} = 'OK';
+        }
+    }
+    elsif ( $resolver->errorstring eq "NXDOMAIN" ) {
+        $hosts_ref->{$hostname}->{check}->{'DNS A'} = "missing";
+    }
+    else {
+        warn "Query failed for A record: " . $resolver->errorstring . "\n";
+    }
+} ## }}}
+
+sub check_dns_ptr_record { ## {{{
+
+=item check_dns_ptr_record()
+
+Check the DNS mapping from $ipv4 address to $hostname and store the result in the given %{$hosts_ref}.
+=cut
+
+    my $resolver  = shift;
+    my $opt       = shift;
+    my $hosts_ref = shift;
+    my $hostname  = shift;
+    my $ipv4      = shift;
+
+    my $ipv4_obj = Net::IP->new($ipv4) or die( Net::IP::Error() );
+    my $reply = $resolver->search( $ipv4_obj->reverse_ip(), 'PTR' );
+    if ( $opt->{verbose} >= 2 ) {
+        warn dump $reply;
+    }
+    if ( defined $reply and $resolver->errorstring eq 'NOERROR' ) {
+        my $problem_count = 0;
+        my @hostnames_dns =
+            map { $_->ptrdname } grep { $_->type eq 'PTR' } $reply->answer;
+        foreach my $hostname_dns (@hostnames_dns) {
+            if ( index( $hostname, q{.} ) == -1 ) { ## $hostname does not contain '.'.
+                $hostname_dns = ( split( /\./xms, $hostname_dns ) )[0];
+            }
+            if ( lc($hostname_dns) ne lc($hostname) ) {
+                $problem_count++;
+            }
+        }
+        if ( scalar @hostnames_dns > 1 or $problem_count ) {
+            $hosts_ref->{$hostname}->{check}->{'DNS PTR'} =
+                "wrong (IMC: $hostname; DNS: " . join( q{, }, sort @hostnames_dns ) . ")";
+        }
+        else {
+            $hosts_ref->{$hostname}->{check}->{'DNS PTR'} = 'OK';
+        }
+    } ## end if ( defined $reply and...)
+    elsif ( $resolver->errorstring eq "NXDOMAIN" ) {
+        $hosts_ref->{$hostname}->{check}->{'DNS PTR'} = "missing";
+    }
+    else {
+        warn "Query failed for PTR record: " . $resolver->errorstring . "\n";
+    }
+} ## }}}
+
+sub check_against_nagios_lconf { ## {{{
+
+=item check_against_nagios_lconf()
+
+Check if the hosts given as %{$hosts_ref} are contained in the last Icinga configuration export and store the result in %{$hosts_ref}.
+=cut
+
+    my $hosts_ref = shift;
+    my $opt       = shift;
+
+    my $export_base_path = $opt->{lconf_export_dir};
+    my @config_files;
+
+    find( sub { s/\.cfg$//xms && push( @config_files, $_ ) }, $export_base_path );
+    foreach my $hostname ( keys %{$hosts_ref} ) {
+        if (
+            scalar
+            grep { ( $_ eq lc($hostname) or index( $_, lc($hostname) ) != -1 or index( lc($hostname), $_ ) != -1 ) }
+            map { lc } @config_files
+            )
+        {
+
+            $hosts_ref->{$hostname}->{check}->{'Monitoring'} = "OK";
+        }
+        else {
+            $hosts_ref->{$hostname}->{check}->{'Monitoring'} = "missing";
+        }
+    }
+} ## }}}
+
+sub get_not_ok_csv { ## {{{
+
+=item get_not_ok_csv()
+
+Return a string containing all hosts with one or more non-OK check fields, encoded as CSV.
+=cut
+
+    my $hosts_ref      = shift;
+    my $deviations_ref = shift;
+
+    my @row_header = ( 'Name', 'DNS A', 'DNS PTR', 'Monitoring', );
+
+    my $csv = Text::CSV->new(
+        {
+            binary => 1, ## Setting this "is still a wise option" according to the manual.
+        }
+    );
+
+    my $csv_string = q{};
+
+    foreach my $hostname ( sort keys %{$hosts_ref} ) {
+        my @problems =
+            grep { $hosts_ref->{$hostname}->{check}->{$_} ne 'OK' }
+            keys %{ $hosts_ref->{$hostname}->{check} };
+        if ( scalar @problems ) {
+            ${$deviations_ref} += scalar @problems;
+            my @row;
+            foreach my $header (@row_header) {
+                my $status = $hosts_ref->{$hostname}->{check}->{$header};
+                if ( $header eq 'Name' ) {
+                    push( @row, $hostname );
+                }
+                elsif ( defined $status ) {
+                    push( @row, $status );
+                }
+                else {
+                    push( @row, $header );
+                }
+            }
+            if ( $csv->combine(@row) ) {
+                $csv_string .= $csv->string() . "\n";
+            }
+        }
+    } ## end foreach my $hostname ( sort...)
+    if ( $csv_string ne q{} ) {
+        if ( $csv->combine(@row_header) ) {
+            $csv_string = $csv->string() . "\n" . $csv_string;
+        }
+
+    }
+
+    return $csv_string;
+} ## }}}
+
+=back
+=cut
+
+## Command-line arguments {{{
+
+my %all_compare_with_options = map { $_ => 1 } split( /,\s*?/xms, 'DNS,Mon' );
+my $opt = {
+    verbose          => 0,
+    compare_with     => 'DNS,Mon',
+    lconf_export_dir => '/var/LConf/lconf.export',
+};
+GetOptions(
+    'i|input-file:s'          => \$opt->{input_file},
+    'o|output-file:s'         => \$opt->{output_file},
+    'I|input-file-encoding:s' => \$opt->{input_file_encoding},
+    'J|input-json-file:s'     => \$opt->{input_json_file},
+    'j|output-json-file:s'    => \$opt->{output_json_file},
+    'D|lconf-export-dir:s'    => \$opt->{lconf_export_dir},
+    'c|compare-with:s'        => \$opt->{compare_with},
+    'v|verbose+'              => \$opt->{verbose},
+    'd|debug'                 => sub { $opt->{verbose} += 2 },
+    'h|help|?'  => sub { pod2usage(1) },
+    'V|version' => sub { say "Version: $VERSION"; exit(0) },
+);
+
+unless ( defined $opt->{input_file} or defined $opt->{input_json_file} ) {
+    die "--output-file or --input_json_file not given!";
+}
+
+my %compare_with = map { $_ => 1 } split( /,\s*?/xms, $opt->{compare_with} );
+{
+    my @not_supported_compare_with =
+        grep { not $all_compare_with_options{$_} } keys %compare_with;
+    if ( scalar @not_supported_compare_with ) {
+        die "The following --compare-with options are not supported: @not_supported_compare_with";
+    }
+}
+
+## }}}
+
+## Go Perl, go …
+
+my $exit_code  = 0;
+my $deviations = 0;
+my $hosts_ref;
+
+unless ( $opt->{input_json_file} ) {
+    $hosts_ref = read_input_csv_file($opt);
+    if ( $compare_with{DNS} ) {
+        check_against_dns( $hosts_ref, $opt );
+    }
+    if ( $compare_with{Mon} ) {
+        unless ( -d $opt->{lconf_export_dir} ) {
+            die "$opt->{lconf_export_dir} is not a directory."
+                . " Please either make sure that it exists or specify the correct directory path via --lconf.export_test";
+        }
+        check_against_nagios_lconf( $hosts_ref, $opt );
+    }
+}
+else {
+    my $input_json_string = read_file( $opt->{input_json_file}, { binmode => ':utf8' } );
+    $hosts_ref = JSON->new->utf8(0)->decode($input_json_string);
+}
+
+if ( $opt->{output_json_file} ) {
+    write_file( $opt->{output_json_file}, { binmode => ':raw' }, encode_json($hosts_ref) );
+}
+
+my $csv_string = get_not_ok_csv( $hosts_ref, \$deviations );
+if ( $opt->{output_file} ) {
+    write_file( $opt->{output_file}, { binmode => ':utf8' }, $csv_string );
+}
+else {
+    print $csv_string;
+}
+
+$exit_code = $deviations ? 1 : $exit_code;
+
+if ( $opt->{verbose} > 0 ) {
+    warn "There where $deviations deviations.";
+    warn dump $hosts_ref;
+}
+
+exit($exit_code);

@@ -1,0 +1,22 @@
+{
+  "host.example.com": {
+    "info": {
+      "ipv4": "192.0.2.23"
+    },
+    "check": {
+      "Monitoring": "OK",
+      "DNS PTR": "missing …",
+      "DNS A": "OK"
+    }
+  },
+  "ns1.example.com": {
+    "check": {
+      "DNS A": "OK",
+      "Monitoring": "OK",
+      "DNS PTR": "OK"
+    },
+    "info": {
+      "ipv4": "192.0.2.42"
+    }
+  }
+}

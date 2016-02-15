@@ -1,0 +1,2 @@
+Name,"DNS A","DNS PTR",Monitoring
+host.example.com,OK,"missing …",OK

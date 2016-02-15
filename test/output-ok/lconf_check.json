@@ -1,0 +1,72 @@
+{
+  "SWT02.example.com": {
+    "check": {
+      "Monitoring": "OK"
+    },
+    "info": {
+      "firmware_version": "J.fnord",
+      "hardware_version": "5",
+      "ipv4": "192.0.2.43",
+      "model": "HP 2520G-8-PoE Switch",
+      "sn": "23",
+      "software_version": "J.5.23",
+      "unit_model": "Device"
+    }
+  },
+  "swt01.example.com": {
+    "check": {
+      "Monitoring": "missing"
+    },
+    "info": {
+      "firmware_version": "J.fnord",
+      "hardware_version": "5",
+      "ipv4": "192.0.2.42",
+      "model": "HP 2520G-8-PoE Switch",
+      "sn": "23",
+      "software_version": "J.5.23",
+      "unit_model": "Device"
+    }
+  },
+  "swt02.example.com": {
+    "check": {
+      "Monitoring": "OK"
+    },
+    "info": {
+      "firmware_version": "J.fnord",
+      "hardware_version": "5",
+      "ipv4": "192.0.2.43",
+      "model": "HP 2520G-8-PoE Switch",
+      "sn": "23",
+      "software_version": "J.5.23",
+      "unit_model": "Device"
+    }
+  },
+  "swt03.example.com": {
+    "check": {
+      "Monitoring": "OK"
+    },
+    "info": {
+      "firmware_version": "J.fnord",
+      "hardware_version": "5",
+      "ipv4": "192.0.2.44",
+      "model": "HP 2520G-8-PoE Switch",
+      "sn": "23",
+      "software_version": "J.5.23",
+      "unit_model": "Device"
+    }
+  },
+  "swt04": {
+    "check": {
+      "Monitoring": "OK"
+    },
+    "info": {
+      "firmware_version": "J.fnord",
+      "hardware_version": "5",
+      "ipv4": "192.0.2.45",
+      "model": "HP 2520G-8-PoE Switch",
+      "sn": "23",
+      "software_version": "J.5.23",
+      "unit_model": "Device"
+    }
+  }
+}
